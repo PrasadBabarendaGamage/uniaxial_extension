@@ -5,11 +5,16 @@
 #> Main script
 # Add Python bindings directory to PATH
 import sys, os
+import numpy as np
+import copy
 
 # Intialise OpenCMISS
 from opencmiss.iron import iron
 
-def solveModel(compressible, useGeneratedMesh, zeroLoad, usePressureBasis):
+def solveModel(loadSteps, stiffness, numberGlobalXElements,
+               numberGlobalYElements, numberGlobalZElements, compressible=False,
+               useGeneratedMesh=True, zeroLoad=False, usePressureBasis=False,
+               usePressureBC=True):
 
     # Set problem parameters - Unit cube
     height = 1.0
@@ -30,18 +35,14 @@ def solveModel(compressible, useGeneratedMesh, zeroLoad, usePressureBasis):
     materialFieldUserNumber = 3
     dependentFieldUserNumber = 4
     equationsSetFieldUserNumber = 5
-    deformedFieldUserNumber = 6
+    solutionFieldUserNumber = 6
+    hydrostaticPressureFieldUserNumber = 7
     equationsSetUserNumber = 1
     problemUserNumber = 1
 
     # Set all diganostic levels on for testing
     #iron.DiagnosticsSetOn(iron.DiagnosticTypes.ALL,[1,2,3,4,5],"Diagnostics",["DOMAIN_MAPPINGS_LOCAL_FROM_GLOBAL_CALCULATE"])
 
-    numberGlobalXElements = 1
-    numberGlobalYElements = 1
-    numberGlobalZElements = 1
-    totalNumberOfNodes=8
-    totalNumberOfElements=1
     InterpolationType = 1
     if(usePressureBasis):
       numberOfMeshComponents = 2
@@ -112,7 +113,8 @@ def solveModel(compressible, useGeneratedMesh, zeroLoad, usePressureBasis):
         generatedMesh.CreateFinish(meshUserNumber,mesh)
 
     else:
-
+        totalNumberOfNodes = 8
+        totalNumberOfElements = 1
         # Start the creation of a manually generated mesh in the region
         mesh = iron.Mesh()
         mesh.CreateStart(meshUserNumber,region,numberOfXi)
@@ -226,9 +228,9 @@ def solveModel(compressible, useGeneratedMesh, zeroLoad, usePressureBasis):
 
     # Set Mooney-Rivlin constants c10 and c01 respectively.
     iron.Field.ComponentValuesInitialiseDP(
-        materialField,iron.FieldVariableTypes.U,iron.FieldParameterSetTypes.VALUES,1,2.0)
+        materialField,iron.FieldVariableTypes.U,iron.FieldParameterSetTypes.VALUES,1,stiffness)
     iron.Field.ComponentValuesInitialiseDP(
-        materialField,iron.FieldVariableTypes.U,iron.FieldParameterSetTypes.VALUES,2,6.0)
+        materialField,iron.FieldVariableTypes.U,iron.FieldParameterSetTypes.VALUES,2,0.0)
     if compressible:
         iron.Field.ComponentValuesInitialiseDP(
             materialField, iron.FieldVariableTypes.U,
@@ -241,12 +243,12 @@ def solveModel(compressible, useGeneratedMesh, zeroLoad, usePressureBasis):
         numberOfMaterialComponents = 4
     dependentField = iron.Field()
     dependentField.CreateStart(dependentFieldUserNumber,region)
-    dependentField.VariableLabelSet(iron.FieldVariableTypes.U,"Dependent")
     dependentField.TypeSet(iron.FieldTypes.GEOMETRIC_GENERAL)
     dependentField.MeshDecompositionSet(decomposition)
     dependentField.GeometricFieldSet(geometricField)
     dependentField.DependentTypeSet(iron.FieldDependentTypes.DEPENDENT)
     dependentField.NumberOfVariablesSet(2)
+    dependentField.VariableLabelSet(iron.FieldVariableTypes.U,"Dependent")
     dependentField.NumberOfComponentsSet(iron.FieldVariableTypes.U,numberOfMaterialComponents)
     dependentField.NumberOfComponentsSet(iron.FieldVariableTypes.DELUDELN,numberOfMaterialComponents)
     dependentField.ComponentMeshComponentSet(iron.FieldVariableTypes.U,1,1)
@@ -285,17 +287,51 @@ def solveModel(compressible, useGeneratedMesh, zeroLoad, usePressureBasis):
 
     # Create a deformed geometry field, as cmgui doesn't like displaying
     # deformed fibres from the dependent field because it isn't a geometric field.
-    deformedField = iron.Field()
-    deformedField.CreateStart(deformedFieldUserNumber, region)
-    deformedField.MeshDecompositionSet(decomposition)
-    deformedField.TypeSet(iron.FieldTypes.GEOMETRIC)
-    deformedField.VariableLabelSet(iron.FieldVariableTypes.U, "DeformedGeometry")
+    solutionField = iron.Field()
+    solutionField.CreateStart(solutionFieldUserNumber, region)
+    solutionField.MeshDecompositionSet(decomposition)
+    solutionField.TypeSet(iron.FieldTypes.GEOMETRIC_GENERAL)
+    solutionField.GeometricFieldSet(geometricField)
+    solutionField.DependentTypeSet(iron.FieldDependentTypes.DEPENDENT)
+    solutionField.NumberOfVariablesSet(2)
+    solutionField.NumberOfComponentsSet(iron.FieldVariableTypes.U,3)
+    solutionField.NumberOfComponentsSet(iron.FieldVariableTypes.DELUDELN,3)
+    solutionField.ComponentMeshComponentSet(iron.FieldVariableTypes.U,1,1)
+    solutionField.ComponentMeshComponentSet(iron.FieldVariableTypes.U,2,1)
+    solutionField.ComponentMeshComponentSet(iron.FieldVariableTypes.U,3,1)
+    solutionField.ComponentMeshComponentSet(iron.FieldVariableTypes.DELUDELN,1,1)
+    solutionField.ComponentMeshComponentSet(iron.FieldVariableTypes.DELUDELN,2,1)
+    solutionField.ComponentMeshComponentSet(iron.FieldVariableTypes.DELUDELN,3,1)
+    solutionField.VariableLabelSet(iron.FieldVariableTypes.U, "DeformedGeometry")
+    solutionField.VariableLabelSet(iron.FieldVariableTypes.DELUDELN, "Forces")
     for component in [1, 2, 3]:
-        deformedField.ComponentMeshComponentSet(
+        solutionField.ComponentMeshComponentSet(
                 iron.FieldVariableTypes.U, component, 1)
+        solutionField.ComponentMeshComponentSet(
+                iron.FieldVariableTypes.DELUDELN, component, 1)
     if InterpolationType == 4:
-        deformedField.ScalingTypeSet(iron.FieldScalingTypes.ARITHMETIC_MEAN)
-    deformedField.CreateFinish()
+        solutionField.ScalingTypeSet(iron.FieldScalingTypes.ARITHMETIC_MEAN)
+    solutionField.CreateFinish()
+
+    hydrostaticPressureField = iron.Field()
+    hydrostaticPressureField.CreateStart(hydrostaticPressureFieldUserNumber, region)
+    hydrostaticPressureField.MeshDecompositionSet(decomposition)
+    hydrostaticPressureField.TypeSet(iron.FieldTypes.GEOMETRIC_GENERAL)
+    hydrostaticPressureField.GeometricFieldSet(geometricField)
+    hydrostaticPressureField.NumberOfVariablesSet(1)
+    hydrostaticPressureField.NumberOfComponentsSet(iron.FieldVariableTypes.U,1)
+    hydrostaticPressureField.VariableLabelSet(iron.FieldVariableTypes.U, "HydrostaticPressure")
+    hydrostaticPressureField.ComponentMeshComponentSet(iron.FieldVariableTypes.U,1,1)
+    if not compressible:
+        hydrostaticPressureField.ComponentInterpolationSet(iron.FieldVariableTypes.U,1,iron.FieldInterpolationTypes.ELEMENT_BASED)
+        if(usePressureBasis):
+            # Set the pressure to be nodally based and use the second mesh component
+            if InterpolationType == 4:
+                hydrostaticPressureField.ComponentInterpolationSet(iron.FieldVariableTypes.U,1,iron.FieldInterpolationTypes.NODE_BASED)
+                hydrostaticPressureField.ComponentMeshComponentSet(iron.FieldVariableTypes.U,1,2)
+    if InterpolationType == 4:
+        hydrostaticPressureField.ScalingTypeSet(iron.FieldScalingTypes.ARITHMETIC_MEAN)
+    hydrostaticPressureField.CreateFinish()
 
     # Create the equations_set
     equationsSetField = iron.Field()
@@ -335,6 +371,9 @@ def solveModel(compressible, useGeneratedMesh, zeroLoad, usePressureBasis):
 
     # Create control loops
     problem.ControlLoopCreateStart()
+    controlLoop = iron.ControlLoop()
+    problem.ControlLoopGet([iron.ControlLoopIdentifiers.NODE], controlLoop)
+    controlLoop.MaximumIterationsSet(loadSteps)
     problem.ControlLoopCreateFinish()
 
     # Create problem solver
@@ -343,7 +382,7 @@ def solveModel(compressible, useGeneratedMesh, zeroLoad, usePressureBasis):
     problem.SolversCreateStart()
     problem.SolverGet([iron.ControlLoopIdentifiers.NODE],1,nonLinearSolver)
     nonLinearSolver.outputType = iron.SolverOutputTypes.PROGRESS
-    nonLinearSolver.NewtonJacobianCalculationTypeSet(iron.JacobianCalculationTypes.FD)
+    nonLinearSolver.NewtonJacobianCalculationTypeSet(iron.JacobianCalculationTypes.EQUATIONS)
     nonLinearSolver.NewtonLinearSolverGet(linearSolver)
     nonLinearSolver.NewtonAbsoluteToleranceSet(1e-14)
     nonLinearSolver.NewtonSolutionToleranceSet(1e-14)
@@ -366,45 +405,60 @@ def solveModel(compressible, useGeneratedMesh, zeroLoad, usePressureBasis):
     boundaryConditions = iron.BoundaryConditions()
     solverEquations.BoundaryConditionsCreateStart(boundaryConditions)
 
-    #Set x=0 nodes to no x displacment in x. Set x=width nodes to 10% x displacement
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,1,1,iron.BoundaryConditionsTypes.FIXED,0.0)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,3,1,iron.BoundaryConditionsTypes.FIXED,0.0)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,5,1,iron.BoundaryConditionsTypes.FIXED,0.0)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,7,1,iron.BoundaryConditionsTypes.FIXED,0.0)
-
+    meshNodes = iron.MeshNodes()
+    mesh.NodesGet(1,meshNodes)
     if zeroLoad:
         load = 0.
     else:
-        load = 0.1*width
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,2,1,iron.BoundaryConditionsTypes.FIXED,load)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,4,1,iron.BoundaryConditionsTypes.FIXED,load)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,6,1,iron.BoundaryConditionsTypes.FIXED,load)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,8,1,iron.BoundaryConditionsTypes.FIXED,load)
-
-    # Set y=0 nodes to no y displacement
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,1,2,iron.BoundaryConditionsTypes.FIXED,0.0)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,2,2,iron.BoundaryConditionsTypes.FIXED,0.0)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,5,2,iron.BoundaryConditionsTypes.FIXED,0.0)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,6,2,iron.BoundaryConditionsTypes.FIXED,0.0)
-
-    # Set z=0 nodes to no y displacement
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,1,3,iron.BoundaryConditionsTypes.FIXED,0.0)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,2,3,iron.BoundaryConditionsTypes.FIXED,0.0)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,3,3,iron.BoundaryConditionsTypes.FIXED,0.0)
-    boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,4,3,iron.BoundaryConditionsTypes.FIXED,0.0)
+        if usePressureBC:
+            load = -1.
+        else:
+            load = 0.1*width
+    for node in range(1,meshNodes.NumberOfNodesGet()+1):
+        xValue = geometricField.ParameterSetGetNodeDP(iron.FieldVariableTypes.U,iron.FieldParameterSetTypes.VALUES,1,1,node,1)
+        yValue = geometricField.ParameterSetGetNodeDP(iron.FieldVariableTypes.U,iron.FieldParameterSetTypes.VALUES,1,1,node,2)
+        zValue = geometricField.ParameterSetGetNodeDP(iron.FieldVariableTypes.U,iron.FieldParameterSetTypes.VALUES,1,1,node,3)
+        # Set x=0 nodes to no x displacment in x.
+        if np.isclose(xValue, 0.0):
+            boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,node,1,iron.BoundaryConditionsTypes.FIXED,0.0)
+        # Set y=0 nodes to no y displacment in y.
+        if np.isclose(yValue, 0.0):
+            boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,node,2,iron.BoundaryConditionsTypes.FIXED,0.0)
+        # Set z=0 nodes to no z displacment in z.
+        if np.isclose(zValue, 0.0):
+            boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,node,3,iron.BoundaryConditionsTypes.FIXED,0.0)
+        if np.isclose(xValue, 1.0):
+            if usePressureBC:
+                # Set surface pressure at nodes where x=width
+                boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.DELUDELN,1,1,node,1,iron.BoundaryConditionsTypes.PRESSURE_INCREMENTED, load)
+            else:
+                # Set x=width nodes to 10% x displacement
+                boundaryConditions.AddNode(dependentField,iron.FieldVariableTypes.U,1,1,node,1,iron.BoundaryConditionsTypes.FIXED_INCREMENTED, load)
 
     solverEquations.BoundaryConditionsCreateFinish()
 
     # Solve the problem
     problem.Solve()
 
-    # Copy deformed geometry into deformed field
     for component in [1, 2, 3]:
+        # Copy deformed geometry into solution field
         dependentField.ParametersToFieldParametersComponentCopy(
             iron.FieldVariableTypes.U,
             iron.FieldParameterSetTypes.VALUES, component,
-            deformedField, iron.FieldVariableTypes.U,
+            solutionField, iron.FieldVariableTypes.U,
             iron.FieldParameterSetTypes.VALUES, component)
+        # Copy forces into solution field
+        dependentField.ParametersToFieldParametersComponentCopy(
+            iron.FieldVariableTypes.DELUDELN,
+            iron.FieldParameterSetTypes.VALUES, component,
+            solutionField, iron.FieldVariableTypes.DELUDELN,
+            iron.FieldParameterSetTypes.VALUES, component)
+    # Copy hydrostatic pressure field values
+    dependentField.ParametersToFieldParametersComponentCopy(
+        iron.FieldVariableTypes.U,
+        iron.FieldParameterSetTypes.VALUES, 4,
+        hydrostaticPressureField, iron.FieldVariableTypes.U,
+        iron.FieldParameterSetTypes.VALUES, 1)
 
     if useGeneratedMesh:
         output_file = "./results/unit_cube_generated_mesh"
@@ -427,6 +481,20 @@ def solveModel(compressible, useGeneratedMesh, zeroLoad, usePressureBasis):
     fields.ElementsExport(output_file+prefix,"FORTRAN")
     fields.Finalise()
 
+    deformedCoordsData = solutionField.ParameterSetDataGetDP(iron.FieldVariableTypes.U, iron.FieldParameterSetTypes.VALUES)
+    undeformedCoordsData = geometricField.ParameterSetDataGetDP(iron.FieldVariableTypes.U, iron.FieldParameterSetTypes.VALUES)
+    displacements = copy.deepcopy(deformedCoordsData-undeformedCoordsData)
+    solutionField.ParameterSetDataRestoreDP(iron.FieldVariableTypes.U, iron.FieldParameterSetTypes.VALUES, deformedCoordsData)
+    geometricField.ParameterSetDataRestoreDP(iron.FieldVariableTypes.U, iron.FieldParameterSetTypes.VALUES, undeformedCoordsData)
+
+    forcesData = solutionField.ParameterSetDataGetDP(iron.FieldVariableTypes.DELUDELN, iron.FieldParameterSetTypes.VALUES)
+    forces = copy.deepcopy(forcesData)
+    solutionField.ParameterSetDataRestoreDP(iron.FieldVariableTypes.DELUDELN, iron.FieldParameterSetTypes.VALUES, forcesData)
+
+    hydrostaticPressureData = hydrostaticPressureField.ParameterSetDataGetDP(iron.FieldVariableTypes.U, iron.FieldParameterSetTypes.VALUES)
+    hydrostaticPressure = copy.deepcopy(hydrostaticPressureData)
+    solutionField.ParameterSetDataRestoreDP(iron.FieldVariableTypes.U, iron.FieldParameterSetTypes.VALUES, hydrostaticPressureData)
+
     problem.Destroy()
     if useGeneratedMesh:
       generatedMesh.Destroy()
@@ -434,14 +502,27 @@ def solveModel(compressible, useGeneratedMesh, zeroLoad, usePressureBasis):
     region.Destroy()
     coordinateSystem.Destroy()
 
+    return displacements, forces, hydrostaticPressure
+
 if __name__ == "__main__":
-    compressible = False
-    useGeneratedMesh = True
-    zeroLoad = True
-    usePressureBasis = False
-    # Arguments: compressible, useGeneratedMesh, zeroLoad, usePressureBasis
-    solveModel(False, False, False, False)
-    #solveModel(True, False, False, False)
-    solveModel(False, True, False, False)
-    solveModel(False, False, True, False)
-    solveModel(False, True, False, True)
+    # Solving a model
+    stiffness = 2.0
+    loadSteps = 1
+    numberGlobalXElements = 2
+    numberGlobalYElements = 2
+    numberGlobalZElements = 2
+    displacements, forces, hydrostaticPressure = solveModel(loadSteps, stiffness,
+                               numberGlobalXElements, numberGlobalYElements,
+                               numberGlobalZElements)
+    print displacements, forces, hydrostaticPressure
+
+    # Solving another second model
+    stiffness = 2.0
+    loadSteps = 1
+    numberGlobalXElements = 3
+    numberGlobalYElements = 3
+    numberGlobalZElements = 3
+    displacements, forces, hydrostaticPressure = solveModel(loadSteps, stiffness,
+                               numberGlobalXElements, numberGlobalYElements,
+                               numberGlobalZElements)
+    print displacements, forces, hydrostaticPressure
